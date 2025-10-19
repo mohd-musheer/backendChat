@@ -12,50 +12,32 @@ const server = http.createServer(app);
 const port = process.env.PORT || 3001;
 
 // --- Middlewares ---
-app.use(cors()); // Enable CORS for all routes
+app.use(cors());
 
-// Create uploads directory if it doesn't exist
 const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir);
 }
-
-app.use('/uploads', express.static(uploadsDir)); // Serve uploaded files statically
+app.use('/uploads', express.static(uploadsDir));
 
 // --- Socket.IO Setup ---
 const io = new Server(server, {
-    cors: {
-        origin: "*", // Allow connections from any origin
-        methods: ["GET", "POST"]
-    },
-    maxHttpBufferSize: 50 * 1024 * 1024 // 50MB file size limit
+    cors: { origin: "*", methods: ["GET", "POST"] },
+    maxHttpBufferSize: 50 * 1024 * 1024
 });
 
 // --- File Upload Setup (Multer) ---
 const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        cb(null, 'uploads/');
-    },
-    filename: (req, file, cb) => {
-        // Use a unique filename to prevent overwrites
-        cb(null, Date.now() + '-' + file.originalname);
-    }
+    destination: (req, file, cb) => cb(null, 'uploads/'),
+    filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname)
 });
-const upload = multer({
-    storage: storage,
-    limits: { fileSize: 50 * 1024 * 1024 } // 50MB
-}).single('file');
+const upload = multer({ storage: storage, limits: { fileSize: 50 * 1024 * 1024 } }).single('file');
 
 // --- API Endpoint for File Uploads ---
 app.post('/upload', (req, res) => {
     upload(req, res, (err) => {
-        if (err) {
-            console.error("Upload error:", err);
-            return res.status(500).json({ error: err.message });
-        }
-        if (!req.file) {
-            return res.status(400).json({ error: 'No file uploaded.' });
-        }
+        if (err) return res.status(500).json({ error: err.message });
+        if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
 
         const fileData = {
             filename: req.file.filename,
@@ -65,23 +47,20 @@ app.post('/upload', (req, res) => {
             path: `/uploads/${req.file.filename}`
         };
 
-        // Notify the specific room about the new file via Socket.IO
-        const { roomId, senderId } = req.body;
+        const { roomId, senderId, tempId } = req.body;
         if (roomId) {
-             io.to(roomId).emit('file-shared', { ...fileData, senderId });
+            const senderSocket = io.sockets.sockets.get(senderId);
+            const senderName = senderSocket ? senderSocket.data.username : 'A user';
+            io.to(roomId).emit('file-shared', { ...fileData, senderId, senderName, tempId });
         }
 
-        // Schedule file deletion after 5 minutes
         const filePath = path.join(uploadsDir, req.file.filename);
         setTimeout(() => {
             fs.unlink(filePath, (unlinkErr) => {
-                if (unlinkErr) {
-                    console.error(`Error deleting file ${filePath}:`, unlinkErr);
-                } else {
-                    console.log(`Successfully deleted file: ${filePath}`);
-                }
+                if (unlinkErr) console.error(`Error deleting file ${filePath}:`, unlinkErr);
+                else console.log(`Successfully deleted file: ${filePath}`);
             });
-        }, 5 * 60 * 1000); // 5 minutes in milliseconds
+        }, 10 * 60 * 1000); // 10 minutes
 
         res.status(200).json(fileData);
     });
@@ -91,39 +70,50 @@ app.post('/upload', (req, res) => {
 io.on('connection', (socket) => {
     console.log(`User connected: ${socket.id}`);
 
-    // Room Creation
-    socket.on('create-room', () => {
-        const roomId = nanoid(8); // Generate a short, unique room ID
+    socket.on('create-room', (username) => {
+        const roomId = nanoid(8);
+        socket.data.username = username;
+        socket.join(roomId);
         socket.emit('room-created', roomId);
     });
 
-    // Joining a Room
-    socket.on('join-room', (roomId) => {
+    socket.on('join-room', ({ roomId, username }) => {
+        const room = io.sockets.adapter.rooms.get(roomId);
+        // NEW: Room limit logic
+        if (room && room.size >= 2) {
+            socket.emit('room-full');
+            return;
+        }
+
+        socket.data.username = username;
         socket.join(roomId);
-        console.log(`User ${socket.id} joined room: ${roomId}`);
-        // Notify others in the room
-        socket.to(roomId).emit('user-joined', socket.id);
+        socket.to(roomId).emit('user-joined', username);
+        socket.emit('join-success');
     });
 
-    // Chat Message Handling
     socket.on('chat-message', ({ roomId, message }) => {
-        // Broadcast message to everyone in the room including the sender
-        io.to(roomId).emit('chat-message', { message, senderId: socket.id });
+        socket.to(roomId).emit('chat-message', {
+            message,
+            senderId: socket.id,
+            senderName: socket.data.username
+        });
     });
 
-    // Typing indicator
     socket.on('typing', ({ roomId, isTyping }) => {
-        socket.to(roomId).emit('typing', { senderId: socket.id, isTyping });
+        socket.to(roomId).emit('typing', { senderName: socket.data.username, isTyping });
     });
 
-    // Disconnect Handling
     socket.on('disconnect', () => {
         console.log(`User disconnected: ${socket.id}`);
-        // You could add logic here to notify rooms the user was in
+        // Notify the other user in the room
+        for (const room of socket.rooms) {
+            if (room !== socket.id) {
+                socket.to(room).emit('user-left', socket.data.username);
+            }
+        }
     });
 });
 
-// --- Server Listen ---
 server.listen(port, () => {
     console.log(`🚀 Server running on http://localhost:${port}`);
 });
