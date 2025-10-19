@@ -11,29 +11,28 @@ const app = express();
 const server = http.createServer(app);
 const port = process.env.PORT || 3001;
 
-// --- Middlewares ---
+// Middlewares
 app.use(cors());
-
 const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir);
 }
 app.use('/uploads', express.static(uploadsDir));
 
-// --- Socket.IO Setup ---
+// Socket.IO Setup
 const io = new Server(server, {
     cors: { origin: "*", methods: ["GET", "POST"] },
     maxHttpBufferSize: 50 * 1024 * 1024
 });
 
-// --- File Upload Setup (Multer) ---
+// File Upload Setup
 const storage = multer.diskStorage({
     destination: (req, file, cb) => cb(null, 'uploads/'),
     filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname)
 });
 const upload = multer({ storage: storage, limits: { fileSize: 50 * 1024 * 1024 } }).single('file');
 
-// --- API Endpoint for File Uploads ---
+// API Endpoint for File Uploads
 app.post('/upload', (req, res) => {
     upload(req, res, (err) => {
         if (err) return res.status(500).json({ error: err.message });
@@ -60,13 +59,13 @@ app.post('/upload', (req, res) => {
                 if (unlinkErr) console.error(`Error deleting file ${filePath}:`, unlinkErr);
                 else console.log(`Successfully deleted file: ${filePath}`);
             });
-        }, 10 * 60 * 1000); // 10 minutes
+        }, 10 * 60 * 1000);
 
         res.status(200).json(fileData);
     });
 });
 
-// --- Socket.IO Connection Handling ---
+// Socket.IO Connection Handling
 io.on('connection', (socket) => {
     console.log(`User connected: ${socket.id}`);
 
@@ -79,7 +78,6 @@ io.on('connection', (socket) => {
 
     socket.on('join-room', ({ roomId, username }) => {
         const room = io.sockets.adapter.rooms.get(roomId);
-        // NEW: Room limit logic
         if (room && room.size >= 2) {
             socket.emit('room-full');
             return;
@@ -91,12 +89,18 @@ io.on('connection', (socket) => {
         socket.emit('join-success');
     });
 
-    socket.on('chat-message', ({ roomId, message }) => {
+    socket.on('chat-message', ({ roomId, message, messageId }) => {
         socket.to(roomId).emit('chat-message', {
             message,
+            messageId,
             senderId: socket.id,
             senderName: socket.data.username
         });
+    });
+
+    // NEW: Listener for read receipts
+    socket.on('message-seen', ({ roomId, messageId }) => {
+        socket.to(roomId).emit('read-receipt', messageId);
     });
 
     socket.on('typing', ({ roomId, isTyping }) => {
@@ -105,9 +109,9 @@ io.on('connection', (socket) => {
 
     socket.on('disconnect', () => {
         console.log(`User disconnected: ${socket.id}`);
-        // Notify the other user in the room
         for (const room of socket.rooms) {
             if (room !== socket.id) {
+                // This sends the "user-left" event
                 socket.to(room).emit('user-left', socket.data.username);
             }
         }
