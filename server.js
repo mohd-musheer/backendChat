@@ -41,7 +41,7 @@ const storage = multer.diskStorage({
         cb(null, Date.now() + '-' + file.originalname);
     }
 });
-const upload = multer({ 
+const upload = multer({
     storage: storage,
     limits: { fileSize: 50 * 1024 * 1024 } // 50MB
 }).single('file');
@@ -64,7 +64,7 @@ app.post('/upload', (req, res) => {
             size: req.file.size,
             path: `/uploads/${req.file.filename}`
         };
-        
+
         // Notify the specific room about the new file via Socket.IO
         const { roomId, senderId } = req.body;
         if (roomId) {
@@ -110,7 +110,7 @@ io.on('connection', (socket) => {
         // Broadcast message to everyone in the room including the sender
         io.to(roomId).emit('chat-message', { message, senderId: socket.id });
     });
-    
+
     // Typing indicator
     socket.on('typing', ({ roomId, isTyping }) => {
         socket.to(roomId).emit('typing', { senderId: socket.id, isTyping });
