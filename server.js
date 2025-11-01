@@ -5,7 +5,6 @@ const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const { nanoid } = require('nanoid');
 
 const app = express();
 const server = http.createServer(app);
@@ -68,49 +67,43 @@ app.post('/upload', (req, res) => {
     });
 });
 
-// --- Helper function to create a room ---
-const createRoom = (socket, username, roomType) => {
-    const roomId = nanoid(8);
-    activeRooms[roomId] = { type: roomType }; // Store the room type
-    socket.data.username = username;
-    socket.join(roomId);
-    socket.emit('room-created', roomId);
-    console.log(`User ${username} created ${roomType} room: ${roomId}`);
-};
 
 // Socket.IO Connection Handling
 io.on('connection', (socket) => {
     console.log(`User connected: ${socket.id}`);
 
-    socket.on('create-private-room', (username) => {
-        createRoom(socket, username, 'private');
-    });
-
-    socket.on('create-group-room', (username) => {
-        createRoom(socket, username, 'group');
-    });
-
-    socket.on('join-room', ({ roomId, username }) => {
+    // --- NEW: Universal Join/Create Logic ---
+    socket.on('join-room', ({ roomId, username, roomType }) => {
         const roomData = activeRooms[roomId];
-
-        if (!roomData) {
-            socket.emit('room-not-found');
-            return;
-        }
-        
         const room = io.sockets.adapter.rooms.get(roomId);
 
-        // Check size ONLY if it's a private room
-        if (roomData.type === 'private' && room && room.size >= 2) {
-            socket.emit('room-full');
-            return;
+        // Case 1: Room exists
+        if (roomData) {
+            // Check if room type matches
+            if (roomData.type !== roomType) {
+                socket.emit('room-type-mismatch', { existingType: roomData.type, attemptedType: roomType });
+                return;
+            }
+            
+            // Check size ONLY if it's a private room
+            if (roomData.type === 'private' && room && room.size >= 2) {
+                socket.emit('room-full');
+                return;
+            }
+        } 
+        // Case 2: Room does NOT exist, so create it
+        else {
+            activeRooms[roomId] = { type: roomType };
+            console.log(`User ${username} creating new ${roomType} room: ${roomId}`);
         }
 
+        // If all checks pass, join the room
         socket.data.username = username;
         socket.join(roomId);
         socket.to(roomId).emit('user-joined', username);
         socket.emit('join-success', roomId);
     });
+    // ------------------------------------
 
     socket.on('chat-message', ({ roomId, message, messageId }) => {
         socket.to(roomId).emit('chat-message', {
@@ -132,13 +125,9 @@ io.on('connection', (socket) => {
         console.log(`User disconnected: ${socket.id}`);
         for (const room of socket.rooms) {
             if (room !== socket.id) {
-                // Notify others in the room
                 socket.to(room).emit('user-left', socket.data.username);
-                
-                // Check if room will be empty after this user leaves
                 const roomAdapter = io.sockets.adapter.rooms.get(room);
                 if (roomAdapter && roomAdapter.size === 1) {
-                    // This is the last user, delete the room
                     delete activeRooms[room];
                     console.log(`Cleaned up empty room: ${room}`);
                 }
