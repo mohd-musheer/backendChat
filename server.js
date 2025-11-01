@@ -1,306 +1,157 @@
-document.addEventListener('DOMContentLoaded', () => {
-    // --- IMPORTANT: Replace with your Render backend URL ---
-    const BACKEND_URL = 'YOUR_RENDER_BACKEND_URL';
-    const socket = io(BACKEND_URL);
+const express = require('express');
+const http = require('http');
+const { Server } = require("socket.io");
+const cors = require('cors');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const { nanoid } = require('nanoid');
 
-    // --- State Variables ---
-    let username = null;
-    let currentRoomId = null;
-    let typingTimeout = null;
-    let messageObserver;
+const app = express();
+const server = http.createServer(app);
+const port = process.env.PORT || 3001;
 
-    // --- DOM Elements ---
-    const screens = {
-        name: document.getElementById('name-screen'),
-        home: document.getElementById('home-screen'),
-        chat: document.getElementById('chat-screen')
-    };
-    const nameForm = document.getElementById('name-form');
-    const nameInput = document.getElementById('name-input');
-    const welcomeMessage = document.getElementById('welcome-message');
-    // --- UPDATED Button IDs ---
-    const createPrivateBtn = document.getElementById('create-private-btn');
-    const createGroupBtn = document.getElementById('create-group-btn');
-    // -------------------------
-    const joinRoomForm = document.getElementById('join-room-form');
-    const roomIdInput = document.getElementById('room-id-input');
-    const errorMessage = document.getElementById('error-message');
-    const roomCodeDisplay = document.getElementById('room-code-display');
-    const messagesArea = document.getElementById('messages-area');
-    const messageForm = document.getElementById('message-form');
-    const messageInput = document.getElementById('message-input');
-    const fileInput = document.getElementById('file-input');
-    const typingIndicator = document.getElementById('typing-indicator');
-    const themeToggle = document.getElementById('theme-toggle');
+// --- In-memory store for room types ---
+const activeRooms = {};
 
-    // --- Force Download Function ---
-    const forceDownload = (url, filename) => {
-        fetch(url)
-            .then(response => response.blob())
-            .then(blob => {
-                const blobUrl = window.URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.style.display = 'none';
-                a.href = blobUrl;
-                a.download = filename;
-                document.body.appendChild(a);
-                a.click();
-                window.URL.revokeObjectURL(blobUrl);
-                a.remove();
-            })
-            .catch(() => alert('Could not download file.'));
-    };
+// Middlewares
+app.use(cors());
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir);
+}
+app.use('/uploads', express.static(uploadsDir));
 
-    // --- Intersection Observer for Read Receipts ---
-    const setupMessageObserver = () => {
-        messageObserver = new IntersectionObserver((entries) => {
-            entries.forEach(entry => {
-                if (entry.isIntersecting) {
-                    const messageEl = entry.target;
-                    const messageId = messageEl.id;
-                    if (messageEl.classList.contains('received') && !messageEl.dataset.seen) {
-                        socket.emit('message-seen', { roomId: currentRoomId, messageId });
-                        messageEl.dataset.seen = 'true';
-                        messageObserver.unobserve(messageEl);
-                    }
-                }
-            });
-        }, { threshold: 0.8 });
-    };
+// Socket.IO Setup
+const io = new Server(server, {
+    cors: { origin: "*", methods: ["GET", "POST"] },
+    maxHttpBufferSize: 50 * 1024 * 1024
+});
 
-    // --- Screen Management & Theming ---
-    const showScreen = (screenName) => {
-        Object.values(screens).forEach(screen => screen.classList.add('hidden'));
-        screens[screenName].classList.remove('hidden');
-    };
-    const currentTheme = localStorage.getItem('theme');
-    if (currentTheme === 'dark') {
-        document.body.classList.add('dark-theme');
-        themeToggle.checked = true;
-    }
-    themeToggle.addEventListener('change', () => {
-        document.body.classList.toggle('dark-theme');
-        localStorage.setItem('theme', themeToggle.checked ? 'dark' : 'light');
-    });
+// File Upload Setup
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, 'uploads/'),
+    filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname)
+});
+const upload = multer({ storage: storage, limits: { fileSize: 50 * 1024 * 1024 } }).single('file');
 
-    // --- Event Listeners ---
-    nameForm.addEventListener('submit', (e) => {
-        e.preventDefault();
-        username = nameInput.value.trim();
-        if (username) {
-            welcomeMessage.textContent = `Welcome, ${username}!`;
-            showScreen('home');
-        }
-    });
+// API Endpoint for File Uploads
+app.post('/upload', (req, res) => {
+    upload(req, res, (err) => {
+        if (err) return res.status(500).json({ error: err.message });
+        if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
 
-    // --- UPDATED for new buttons ---
-    createPrivateBtn.addEventListener('click', () => {
-        errorMessage.classList.add('hidden');
-        socket.emit('create-private-room', username);
-    });
+        const fileData = {
+            filename: req.file.filename,
+            originalname: req.file.originalname,
+            mimetype: req.file.mimetype,
+            size: req.file.size,
+            path: `/uploads/${req.file.filename}`
+        };
 
-    createGroupBtn.addEventListener('click', () => {
-        errorMessage.classList.add('hidden');
-        socket.emit('create-group-room', username);
-    });
-
-    // --- UPDATED to be universal ---
-    joinRoomForm.addEventListener('submit', (e) => {
-        e.preventDefault();
-        const roomId = roomIdInput.value.trim();
+        const { roomId, senderId, tempId } = req.body;
         if (roomId) {
-            errorMessage.classList.add('hidden');
-            socket.emit('join-room', { roomId, username });
+            const senderSocket = io.sockets.sockets.get(senderId);
+            const senderName = senderSocket ? senderSocket.data.username : 'A user';
+            io.to(roomId).emit('file-shared', { ...fileData, senderId, senderName, tempId });
         }
-    });
-    // -------------------------------
 
-    messageForm.addEventListener('submit', (e) => {
-        e.preventDefault();
-        const message = messageInput.value.trim();
-        if (message) {
-            const messageId = `msg-${Date.now()}`;
-            displayMessage({ message, messageId, senderName: 'You' }, true);
-            socket.emit('chat-message', { roomId: currentRoomId, message, messageId });
-            messageInput.value = '';
-            socket.emit('typing', { roomId: currentRoomId, isTyping: false });
+        const filePath = path.join(uploadsDir, req.file.filename);
+        setTimeout(() => {
+            fs.unlink(filePath, (unlinkErr) => {
+                if (unlinkErr) console.error(`Error deleting file ${filePath}:`, unlinkErr);
+                else console.log(`Successfully deleted file: ${filePath}`);
+            });
+        }, 10 * 60 * 1000);
+
+        res.status(200).json(fileData);
+    });
+});
+
+// --- Helper function to create a room ---
+const createRoom = (socket, username, roomType) => {
+    const roomId = nanoid(8);
+    activeRooms[roomId] = { type: roomType }; // Store the room type
+    socket.data.username = username;
+    socket.join(roomId);
+    socket.emit('room-created', roomId);
+    console.log(`User ${username} created ${roomType} room: ${roomId}`);
+};
+
+// Socket.IO Connection Handling
+io.on('connection', (socket) => {
+    console.log(`User connected: ${socket.id}`);
+
+    // --- UPDATED: Two types of creation ---
+    socket.on('create-private-room', (username) => {
+        createRoom(socket, username, 'private');
+    });
+
+    socket.on('create-group-room', (username) => {
+        createRoom(socket, username, 'group');
+    });
+    // ------------------------------------
+
+    // --- UPDATED: Universal join logic ---
+    socket.on('join-room', ({ roomId, username }) => {
+        const roomData = activeRooms[roomId];
+
+        if (!roomData) {
+            socket.emit('room-not-found');
+            return;
         }
-    });
+        
+        const room = io.sockets.adapter.rooms.get(roomId);
 
-    fileInput.addEventListener('change', (e) => {
-        const file = e.target.files[0];
-        if (file) uploadFile(file);
-        e.target.value = '';
-    });
-
-    messageInput.addEventListener('input', () => {
-        clearTimeout(typingTimeout);
-        socket.emit('typing', { roomId: currentRoomId, isTyping: true });
-        typingTimeout = setTimeout(() => socket.emit('typing', { roomId: currentRoomId, isTyping: false }), 2000);
-    });
-    
-    messagesArea.addEventListener('click', (e) => {
-        const downloadBtn = e.target.closest('.download-btn');
-        if (downloadBtn) {
-            e.preventDefault();
-            const url = downloadBtn.dataset.url;
-            const filename = downloadBtn.dataset.filename;
-            forceDownload(url, filename);
+        // Check size ONLY if it's a private room
+        if (roomData.type === 'private' && room && room.size >= 2) {
+            socket.emit('room-full');
+            return;
         }
+
+        socket.data.username = username;
+        socket.join(roomId);
+        socket.to(roomId).emit('user-joined', username);
+        socket.emit('join-success', roomId);
+    });
+    // ------------------------------------
+
+    socket.on('chat-message', ({ roomId, message, messageId }) => {
+        socket.to(roomId).emit('chat-message', {
+            message, messageId,
+            senderId: socket.id,
+            senderName: socket.data.username
+        });
     });
 
-    // --- Socket.IO Event Handlers ---
-    socket.on('room-created', (roomId) => {
-        currentRoomId = roomId;
-        roomCodeDisplay.textContent = roomId;
-        showScreen('chat');
-        setupMessageObserver();
-        displayNotification(`Room created. Share this code: ${roomId}`);
+    socket.on('message-seen', ({ roomId, messageId }) => {
+        socket.to(roomId).emit('read-receipt', messageId);
     });
 
-    socket.on('join-success', (joinedRoomId) => {
-        currentRoomId = joinedRoomId;
-        roomCodeDisplay.textContent = joinedRoomId;
-        showScreen('chat');
-        setupMessageObserver();
+    socket.on('typing', ({ roomId, isTyping }) => {
+        socket.to(roomId).emit('typing', { senderName: socket.data.username, isTyping });
     });
 
-    socket.on('room-full', () => {
-        errorMessage.textContent = 'This private room is full (2 people max).';
-        errorMessage.classList.remove('hidden');
-    });
-
-    // --- NEW error message ---
-    socket.on('room-not-found', () => {
-        errorMessage.textContent = 'Room not found. Check the code and try again.';
-        errorMessage.classList.remove('hidden');
-    });
-
-    socket.on('user-joined', (joinedUsername) => displayNotification(`${joinedUsername} has joined the chat.`));
-    socket.on('user-left', (leftUsername) => displayNotification(`${leftUsername || 'The other user'} has left the chat.`));
-    socket.on('chat-message', (data) => displayMessage(data, false));
-    socket.on('typing', ({ senderName, isTyping }) => {
-        typingIndicator.textContent = isTyping ? `${senderName} is typing...` : '';
-    });
-    
-    socket.on('file-shared', (fileData) => {
-        const tempMessage = document.getElementById(fileData.tempId);
-        if (tempMessage) tempMessage.remove();
-        displayFile(fileData, fileData.senderId === socket.id);
-    });
-
-    socket.on('read-receipt', (messageId) => {
-        const messageEl = document.getElementById(messageId);
-        if (messageEl) {
-            const statusIcon = messageEl.querySelector('.message-status i');
-            if (statusIcon) {
-                statusIcon.classList.remove('fa-check');
-                statusIcon.classList.add('fa-check-double', 'read');
+    // --- UPDATED: Clean up empty rooms ---
+    socket.on('disconnecting', () => {
+        console.log(`User disconnected: ${socket.id}`);
+        for (const room of socket.rooms) {
+            if (room !== socket.id) {
+                // Notify others in the room
+                socket.to(room).emit('user-left', socket.data.username);
+                
+                // Check if room will be empty after this user leaves
+                const roomAdapter = io.sockets.adapter.rooms.get(room);
+                if (roomAdapter && roomAdapter.size === 1) {
+                    // This is the last user, delete the room
+                    delete activeRooms[room];
+                    console.log(`Cleaned up empty room: ${room}`);
+                }
             }
         }
     });
+});
 
-    // --- Helper Functions ---
-    const scrollToBottom = () => messagesArea.scrollTop = messagesArea.scrollHeight;
-
-    const displayNotification = (text) => {
-        const div = document.createElement('div');
-        div.classList.add('notification');
-        div.textContent = text;
-        messagesArea.appendChild(div);
-        scrollToBottom();
-    };
-
-    const displayMessage = ({ message, messageId, senderName }, isSent) => {
-        const div = document.createElement('div');
-        div.id = messageId;
-        div.classList.add('message', isSent ? 'sent' : 'received');
-        const statusIcon = isSent ? `<div class="message-status"><i class="fas fa-check"></i></div>` : '';
-        div.innerHTML = `
-            <p class="sender-name">${senderName}</p>
-            <div class="message-bubble">
-                <span>${message}</span>
-                ${statusIcon}
-            </div>
-        `;
-        messagesArea.appendChild(div);
-        if (!isSent) {
-            messageObserver.observe(div);
-        }
-        scrollToBottom();
-    };
-
-    const displayFile = ({ originalname, mimetype, size, path, senderName }, isSent) => {
-        const fileLink = `${BACKEND_URL}${path}`;
-        const div = document.createElement('div');
-        div.classList.add('message', isSent ? 'sent' : 'received');
-        div.innerHTML = `
-            <p class="sender-name">${senderName}</p>
-            <div class="message-bubble">
-                <div class="file-message">
-                    <i class="file-icon ${getFileIcon(mimetype)}"></i>
-                    <div class="file-info">
-                        <p>${originalname}</p>
-                        <span class="file-size">${formatFileSize(size)}</span>
-                    </div>
-                    <a href="#" data-url="${fileLink}" data-filename="${originalname}" class="download-btn" title="Download">
-                        <img src="download-icon.png" alt="Download">
-                    </a>
-                </div>
-            </div>`;
-        messagesArea.appendChild(div);
-        scrollToBottom();
-    };
-
-    const uploadFile = async (file) => {
-        const tempId = `temp-${Date.now()}`;
-        const div = document.createElement('div');
-        div.id = tempId;
-        div.classList.add('message', 'sent');
-        div.innerHTML = `
-            <p class="sender-name">You</p>
-            <div class="message-bubble">
-                <div class="file-message">
-                    <div class="loader"></div>
-                    <div class="file-info">
-                        <p>Uploading ${file.name}...</p>
-                    </div>
-                </div>
-            </div>`;
-        messagesArea.appendChild(div);
-        scrollToBottom();
-
-        const formData = new FormData();
-        formData.append('file', file);
-        formData.append('roomId', currentRoomId);
-        formData.append('senderId', socket.id);
-        formData.append('tempId', tempId);
-
-        try {
-            await fetch(`${BACKEND_URL}/upload`, { method: 'POST', body: formData });
-        } catch (error) {
-            console.error('File upload failed:', error);
-            if (document.getElementById(tempId)) document.getElementById(tempId).remove();
-            displayMessage({ message: '⚠️ File upload failed.', messageId: `err-${Date.now()}`, senderName: 'Error' }, true);
-        }
-    };
-    
-    const getFileIcon = (mimeType) => {
-        if (mimeType.startsWith('image/')) return 'fa-solid fa-file-image';
-        if (mimeType.startsWith('video/')) return 'fa-solid fa-file-video';
-        if (mimeType === 'application/pdf') return 'fa-solid fa-file-pdf';
-        if (mimeType.startsWith('audio/')) return 'fa-solid fa-file-audio';
-        return 'fa-solid fa-file';
-    };
-    
-    const formatFileSize = (bytes) => {
-        if (bytes === 0) return '0 Bytes';
-        const k = 1024;
-        const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-        const i = Math.floor(Math.log(bytes) / Math.log(k));
-        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-    };
-
-    // --- Initial Setup ---
-    showScreen('name');
+server.listen(port, () => {
+    console.log(`🚀 Server running on http://localhost:${port}`);
 });
