@@ -76,9 +76,12 @@ io.on('connection', (socket) => {
         socket.emit('room-created', roomId);
     });
 
-    socket.on('join-room', ({ roomId, username }) => {
+    // --- UPDATED to handle group chats ---
+    socket.on('join-room', ({ roomId, username, isGroup }) => {
         const room = io.sockets.adapter.rooms.get(roomId);
-        if (room && room.size >= 2) {
+        
+        // Only check room size if it's NOT a group chat
+        if (!isGroup && room && room.size >= 2) {
             socket.emit('room-full');
             return;
         }
@@ -86,7 +89,9 @@ io.on('connection', (socket) => {
         socket.data.username = username;
         socket.join(roomId);
         socket.to(roomId).emit('user-joined', username);
-        socket.emit('join-success');
+        
+        // Send back the room ID on success
+        socket.emit('join-success', roomId);
     });
 
     socket.on('chat-message', ({ roomId, message, messageId }) => {
@@ -98,7 +103,6 @@ io.on('connection', (socket) => {
         });
     });
 
-    // NEW: Listener for read receipts
     socket.on('message-seen', ({ roomId, messageId }) => {
         socket.to(roomId).emit('read-receipt', messageId);
     });
@@ -111,7 +115,6 @@ io.on('connection', (socket) => {
         console.log(`User disconnected: ${socket.id}`);
         for (const room of socket.rooms) {
             if (room !== socket.id) {
-                // This sends the "user-left" event
                 socket.to(room).emit('user-left', socket.data.username);
             }
         }
