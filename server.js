@@ -82,7 +82,6 @@ const createRoom = (socket, username, roomType) => {
 io.on('connection', (socket) => {
     console.log(`User connected: ${socket.id}`);
 
-    // --- UPDATED: Two types of creation ---
     socket.on('create-private-room', (username) => {
         createRoom(socket, username, 'private');
     });
@@ -90,9 +89,7 @@ io.on('connection', (socket) => {
     socket.on('create-group-room', (username) => {
         createRoom(socket, username, 'group');
     });
-    // ------------------------------------
 
-    // --- UPDATED: Universal join logic ---
     socket.on('join-room', ({ roomId, username }) => {
         const roomData = activeRooms[roomId];
 
@@ -114,7 +111,6 @@ io.on('connection', (socket) => {
         socket.to(roomId).emit('user-joined', username);
         socket.emit('join-success', roomId);
     });
-    // ------------------------------------
 
     socket.on('chat-message', ({ roomId, message, messageId }) => {
         socket.to(roomId).emit('chat-message', {
@@ -132,7 +128,6 @@ io.on('connection', (socket) => {
         socket.to(roomId).emit('typing', { senderName: socket.data.username, isTyping });
     });
 
-    // --- UPDATED: Clean up empty rooms ---
     socket.on('disconnecting', () => {
         console.log(`User disconnected: ${socket.id}`);
         for (const room of socket.rooms) {
